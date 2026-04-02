@@ -1,5 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 
+// Cloudflare Pages 要求 Edge Runtime
+export const runtime = "edge";
+
 // Remove.bg API
 const REMOVE_BG_API = "https://api.remove.bg/v1.0/removebg";
 

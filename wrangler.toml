@@ -1,0 +1,7 @@
+name = "bg-remover"
+compatibility_date = "2026-04-02"
+compatibility_flags = ["nodejs_compat"]
+
+[vars]
+REMOVE_BG_API_KEY = "oZwJGrqcfpYsZpEtzXcXDSB4"
+NODE_VERSION = "22"
