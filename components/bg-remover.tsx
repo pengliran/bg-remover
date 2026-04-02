@@ -395,8 +395,8 @@ export function BgRemover({ user }: { user: UserInfo | null }) {
               )}
 
               {[
-                { name: "Basic", price: "$4.99", count: "100 次/月" },
-                { name: "Pro", price: "$9.99", count: "500 次/月", popular: true },
+                { name: "Basic", price: "$1.99", count: "100 次/月" },
+                { name: "Pro", price: "$8.99", count: "500 次/月", popular: true },
                 { name: "Unlimited", price: "$19.99", count: "不限次" },
               ].map((plan) => (
                 <button
