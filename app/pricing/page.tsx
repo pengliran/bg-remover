@@ -93,6 +93,11 @@ export default function PricingPage() {
           <a href="/" className="text-sm text-muted-foreground hover:text-foreground transition-colors">
             ← 返回工具
           </a>
+          {user && (
+            <a href="/account" className="text-sm text-muted-foreground hover:text-foreground transition-colors">
+              个人中心
+            </a>
+          )}
         </div>
       </header>
 
