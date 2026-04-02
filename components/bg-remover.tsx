@@ -431,7 +431,10 @@ export function BgRemover({ user }: { user: UserInfo | null }) {
               ))}
 
               <p className="text-xs text-muted-foreground text-center">
-                Pay-as-you-go：$0.05/张，按需购买积分包
+                Pay-as-you-go：$0.05/张，按需购买积分包 ·{" "}
+                <a href="/pricing" className="text-primary hover:underline">
+                  查看完整定价
+                </a>
               </p>
             </div>
 
