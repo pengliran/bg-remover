@@ -431,7 +431,7 @@ export function BgRemover({ user }: { user: UserInfo | null }) {
               ))}
 
               <p className="text-xs text-muted-foreground text-center">
-                按 $0.05/张 按量付费方案即将推出
+                Pay-as-you-go：$0.05/张，按需购买积分包
               </p>
             </div>
 
