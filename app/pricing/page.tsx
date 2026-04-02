@@ -1,6 +1,7 @@
 "use client";
 
 import { useUser } from "@/components/bg-remover";
+import { useState } from "react";
 
 interface PlanCardProps {
   name: string;
@@ -9,10 +10,34 @@ interface PlanCardProps {
   count: string;
   features: string[];
   popular?: boolean;
-  onSelect?: () => void;
+  planId?: string;
 }
 
-function PlanCard({ name, price, period, count, features, popular, onSelect }: PlanCardProps) {
+function PlanCard({ name, price, period, count, features, popular, planId }: PlanCardProps) {
+  const [loading, setLoading] = useState(false);
+
+  const handleSubscribe = async () => {
+    if (!planId) return;
+    setLoading(true);
+    try {
+      const res = await fetch("/api/paypal", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ planId, planType: "subscription" }),
+      });
+      const data = await res.json();
+      if (data.approvalUrl) {
+        window.location.href = data.approvalUrl;
+      } else {
+        alert(data.error || "创建订单失败");
+      }
+    } catch {
+      alert("网络错误，请重试");
+    } finally {
+      setLoading(false);
+    }
+  };
+
   return (
     <div
       className={`relative rounded-xl p-6 flex flex-col ${
@@ -47,28 +72,58 @@ function PlanCard({ name, price, period, count, features, popular, onSelect }: P
         ))}
       </ul>
       <button
-        onClick={onSelect}
+        onClick={handleSubscribe}
+        disabled={loading || !planId}
         className={`w-full py-2.5 rounded-lg font-medium text-sm transition-colors ${
-          popular
-            ? "bg-primary text-white hover:bg-primary/90"
-            : "border border-border hover:bg-muted"
+          loading
+            ? "opacity-50 cursor-not-allowed"
+            : popular
+              ? "bg-primary text-white hover:bg-primary/90"
+              : "border border-border hover:bg-muted"
         }`}
       >
-        {onSelect ? "选择方案" : "当前方案"}
+        {loading ? "处理中..." : planId ? "Subscribe with PayPal" : "选择方案"}
       </button>
     </div>
   );
 }
 
-function CreditPackCard({ credits, price, perCredit }: { credits: string; price: string; perCredit: string }) {
+function CreditPackCard({ credits, price, perCredit, packId }: { credits: string; price: string; perCredit: string; packId: string }) {
+  const [loading, setLoading] = useState(false);
+
+  const handleBuy = async () => {
+    setLoading(true);
+    try {
+      const res = await fetch("/api/paypal", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ planId: packId, planType: "credit" }),
+      });
+      const data = await res.json();
+      if (data.approvalUrl) {
+        window.location.href = data.approvalUrl;
+      } else {
+        alert(data.error || "创建订单失败");
+      }
+    } catch {
+      alert("网络错误，请重试");
+    } finally {
+      setLoading(false);
+    }
+  };
+
   return (
     <div className="border border-border rounded-xl p-5 flex flex-col items-center text-center hover:shadow-md transition-shadow">
       <div className="text-2xl font-bold">{credits}</div>
       <div className="text-muted-foreground text-sm mb-3">积分包</div>
       <div className="text-lg font-bold">{price}</div>
       <div className="text-xs text-muted-foreground">{perCredit}/张</div>
-      <button className="mt-4 w-full py-2 border border-border rounded-lg text-sm font-medium hover:bg-muted transition-colors">
-        购买
+      <button
+        onClick={handleBuy}
+        disabled={loading}
+        className="mt-4 w-full py-2 border border-border rounded-lg text-sm font-medium hover:bg-muted transition-colors disabled:opacity-50"
+      >
+        {loading ? "处理中..." : "Buy with PayPal"}
       </button>
     </div>
   );
@@ -90,14 +145,16 @@ export default function PricingPage() {
             </div>
             <h1 className="text-xl font-bold">BG Remover</h1>
           </a>
-          <a href="/" className="text-sm text-muted-foreground hover:text-foreground transition-colors">
-            ← 返回工具
-          </a>
-          {user && (
-            <a href="/account" className="text-sm text-muted-foreground hover:text-foreground transition-colors">
-              个人中心
+          <div className="flex items-center gap-3">
+            <a href="/" className="text-sm text-muted-foreground hover:text-foreground transition-colors">
+              ← 返回工具
             </a>
-          )}
+            {user && (
+              <a href="/account" className="text-sm text-muted-foreground hover:text-foreground transition-colors">
+                个人中心
+              </a>
+            )}
+          </div>
         </div>
       </header>
 
@@ -109,6 +166,11 @@ export default function PricingPage() {
         <p className="text-muted-foreground text-lg max-w-xl mx-auto">
           从免费到专业版，按需选择。所有付费方案均无水印、高画质。
         </p>
+        {!user && (
+          <p className="text-sm text-primary mt-3">
+            <a href="/api/auth" className="hover:underline">登录后</a>即可购买
+          </p>
+        )}
       </section>
 
       {/* Pricing Cards */}
@@ -121,6 +183,7 @@ export default function PricingPage() {
               price="$1.99"
               period="/月"
               count="每月 100 次"
+              planId="basic"
               features={[
                 "100 次去背景/月",
                 "最高 10MB 图片",
@@ -134,6 +197,7 @@ export default function PricingPage() {
               period="/月"
               count="每月 500 次"
               popular
+              planId="pro"
               features={[
                 "500 次去背景/月",
                 "最高 10MB 图片",
@@ -149,6 +213,7 @@ export default function PricingPage() {
               price="$19.99"
               period="/月"
               count="不限次数"
+              planId="unlimited"
               features={[
                 "不限次去背景",
                 "最高 10MB 图片",
@@ -163,16 +228,16 @@ export default function PricingPage() {
           </div>
 
           {/* Pay-as-you-go 积分包 */}
-          <div className="mb-16">
+          <div className="mb-16" id="credits">
             <h3 className="text-2xl font-bold text-center mb-2">按需购买积分包</h3>
             <p className="text-muted-foreground text-center mb-8">
               不想包月？购买积分包，用多少算多少，永久有效。
             </p>
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-              <CreditPackCard credits="20 张" price="$1" perCredit="$0.05" />
-              <CreditPackCard credits="100 张" price="$4.50" perCredit="$0.045" />
-              <CreditPackCard credits="500 张" price="$20" perCredit="$0.04" />
-              <CreditPackCard credits="1000 张" price="$35" perCredit="$0.035" />
+              <CreditPackCard credits="20 张" price="$1" perCredit="$0.05" packId="pack_20" />
+              <CreditPackCard credits="100 张" price="$4.50" perCredit="$0.045" packId="pack_100" />
+              <CreditPackCard credits="500 张" price="$20" perCredit="$0.04" packId="pack_500" />
+              <CreditPackCard credits="1000 张" price="$35" perCredit="$0.035" packId="pack_1000" />
             </div>
           </div>
 
@@ -199,7 +264,7 @@ export default function PricingPage() {
                 },
                 {
                   q: "支持哪些支付方式？",
-                  a: "支持信用卡（Visa / Mastercard）、PayPal。",
+                  a: "支持 PayPal（信用卡、借记卡、PayPal 余额）。",
                 },
               ].map((item, i) => (
                 <div key={i} className="border border-border rounded-lg p-4">
@@ -214,7 +279,7 @@ export default function PricingPage() {
 
       {/* Footer */}
       <footer className="border-t border-border px-6 py-6 text-center text-sm text-muted-foreground">
-        <p>All prices in USD. Need help? Contact us at support@srep.top</p>
+        <p>All prices in USD · Powered by PayPal · Need help? Contact us at support@srep.top</p>
       </footer>
     </main>
   );
