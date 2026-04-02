@@ -5,7 +5,7 @@ import { ImageUploader } from "./image-uploader";
 
 type Status = "idle" | "processing" | "done" | "error";
 
-interface UserInfo {
+export interface UserInfo {
   id: string;
   email: string;
   name: string;
@@ -18,6 +18,14 @@ interface HistoryItem {
   resultThumb: string;
   timestamp: number;
   fileName: string;
+}
+
+interface UsageInfo {
+  usedToday: number;
+  limit: number;
+  remaining: number;
+  isGuest: boolean;
+  plan: string;
 }
 
 const HISTORY_KEY = "bg-remover-history";
@@ -56,8 +64,6 @@ function saveHistory(items: HistoryItem[]) {
   localStorage.setItem(HISTORY_KEY, JSON.stringify(items));
 }
 
-export { type UserInfo };
-
 export function useUser() {
   const [user, setUser] = useState<UserInfo | null>(null);
 
@@ -78,7 +84,7 @@ export function useUser() {
   return { user, setUser, logout };
 }
 
-export function BgRemover() {
+export function BgRemover({ user }: { user: UserInfo | null }) {
   const [originalUrl, setOriginalUrl] = useState<string | null>(null);
   const [resultBlob, setResultBlob] = useState<Blob | null>(null);
   const [resultUrl, setResultUrl] = useState<string | null>(null);
@@ -86,11 +92,30 @@ export function BgRemover() {
   const [error, setError] = useState<string>("");
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [fileName, setFileName] = useState("");
+  const [usage, setUsage] = useState<UsageInfo | null>(null);
+  const [showUpgrade, setShowUpgrade] = useState(false);
   const fileRef = useRef<File | null>(null);
 
+  // 加载历史（仅登录用户）
   useEffect(() => {
-    setHistory(loadHistory());
+    if (user) {
+      setHistory(loadHistory());
+    } else {
+      setHistory([]);
+    }
+  }, [user]);
+
+  // 加载用量信息
+  const fetchUsage = useCallback(() => {
+    fetch("/api/remove-bg")
+      .then((res) => res.json())
+      .then((data) => setUsage(data))
+      .catch(() => {});
   }, []);
+
+  useEffect(() => {
+    fetchUsage();
+  }, [fetchUsage]);
 
   const handleFileSelect = useCallback((file: File) => {
     fileRef.current = file;
@@ -107,6 +132,12 @@ export function BgRemover() {
     const file = fileRef.current;
     if (!file) return;
 
+    // 检查用量
+    if (usage && usage.remaining <= 0) {
+      setShowUpgrade(true);
+      return;
+    }
+
     setStatus("processing");
     setError("");
 
@@ -119,10 +150,33 @@ export function BgRemover() {
         body: formData,
       });
 
+      if (res.status === 429) {
+        const data = await res.json();
+        setError(
+          data.isGuest
+            ? `免费额度已用完（${data.usedToday}/${data.limit}次）。登录后每月可使用 10 次免费额度。`
+            : `今日额度已用完（${data.usedToday}/${data.limit}次）。升级套餐获取更多次数。`
+        );
+        setShowUpgrade(true);
+        setStatus("error");
+        setUsage(data);
+        return;
+      }
+
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
         throw new Error(data.error || `Request failed: ${res.status}`);
       }
+
+      // 更新用量
+      const remaining = parseInt(res.headers.get("X-Usage-Remaining") || "0");
+      const used = parseInt(res.headers.get("X-Usage-Used") || "0");
+      const limit = parseInt(res.headers.get("X-Usage-Limit") || "0");
+      setUsage((prev) =>
+        prev
+          ? { ...prev, remaining, usedToday: used, limit }
+          : { usedToday: used, limit, remaining, isGuest: !user, plan: user ? "free" : "guest" }
+      );
 
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
@@ -130,31 +184,34 @@ export function BgRemover() {
       setResultBlob(blob);
       setStatus("done");
 
-      const [origThumb, resThumb] = await Promise.all([
-        createThumbnail(file),
-        createThumbnail(blob),
-      ]);
+      // 保存历史（仅登录用户）
+      if (user) {
+        const [origThumb, resThumb] = await Promise.all([
+          createThumbnail(file),
+          createThumbnail(blob),
+        ]);
 
-      const newItem: HistoryItem = {
-        id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
-        originalThumb: origThumb,
-        resultThumb: resThumb,
-        timestamp: Date.now(),
-        fileName: file.name,
-      };
+        const newItem: HistoryItem = {
+          id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+          originalThumb: origThumb,
+          resultThumb: resThumb,
+          timestamp: Date.now(),
+          fileName: file.name,
+        };
 
-      setHistory((prev) => {
-        const updated = [newItem, ...prev].slice(0, MAX_HISTORY);
-        saveHistory(updated);
-        return updated;
-      });
+        setHistory((prev) => {
+          const updated = [newItem, ...prev].slice(0, MAX_HISTORY);
+          saveHistory(updated);
+          return updated;
+        });
+      }
     } catch (err) {
       const message =
         err instanceof Error ? err.message : "Something went wrong";
       setError(message);
       setStatus("error");
     }
-  }, []);
+  }, [fileRef, usage, user, fetchUsage]);
 
   const handleDownload = useCallback(() => {
     if (!resultBlob) return;
@@ -197,6 +254,34 @@ export function BgRemover() {
 
   return (
     <div className="space-y-8">
+      {/* 用量提示条 */}
+      {usage && (
+        <div className="flex items-center justify-between bg-muted rounded-lg px-4 py-2.5 text-sm">
+          <div className="flex items-center gap-2">
+            <span className="text-muted-foreground">今日已用:</span>
+            <span className="font-medium">
+              {usage.usedToday} / {usage.limit === Infinity ? "∞" : usage.limit}
+            </span>
+          </div>
+          {!user && (
+            <button
+              onClick={() => (window.location.href = "/api/auth")}
+              className="text-primary hover:underline text-sm"
+            >
+              登录获取更多次数 →
+            </button>
+          )}
+          {user && usage.plan === "free" && usage.remaining <= 3 && usage.remaining > 0 && (
+            <button
+              onClick={() => setShowUpgrade(true)}
+              className="text-primary hover:underline text-sm"
+            >
+              次数不足，升级套餐 →
+            </button>
+          )}
+        </div>
+      )}
+
       {/* 上传区域 */}
       {!originalUrl && <ImageUploader onFileSelect={handleFileSelect} />}
 
@@ -252,7 +337,8 @@ export function BgRemover() {
             {status === "idle" && (
               <button
                 onClick={handleRemoveBg}
-                className="bg-primary text-primary-foreground px-6 py-3 rounded-lg font-medium hover:bg-primary/90 transition-colors"
+                disabled={usage ? usage.remaining <= 0 : false}
+                className="bg-primary text-primary-foreground px-6 py-3 rounded-lg font-medium hover:bg-primary/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 🪄 Remove Background
               </button>
@@ -275,8 +361,92 @@ export function BgRemover() {
         </div>
       )}
 
-      {/* 历史记录 */}
-      {history.length > 0 && (
+      {/* 升级弹窗 */}
+      {showUpgrade && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-xl max-w-lg w-full p-6 space-y-4">
+            <h3 className="text-xl font-bold">升级套餐</h3>
+            <p className="text-muted-foreground text-sm">
+              {usage?.isGuest
+                ? "登录即可获得每月 10 次免费额度，或选择以下套餐获取更多次数。"
+                : "免费额度已用完，升级套餐继续使用。"}
+            </p>
+
+            <div className="grid gap-3">
+              {/* 游客/登录提示 */}
+              {!user && (
+                <button
+                  onClick={() => {
+                    setShowUpgrade(false);
+                    window.location.href = "/api/auth";
+                  }}
+                  className="border-2 border-primary rounded-lg p-4 text-left hover:bg-primary/5 transition-colors"
+                >
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <div className="font-bold text-lg">免费登录</div>
+                      <div className="text-sm text-muted-foreground">
+                        每月 10 次
+                      </div>
+                    </div>
+                    <span className="text-primary font-bold">$0</span>
+                  </div>
+                </button>
+              )}
+
+              {[
+                { name: "Basic", price: "$4.99", count: "100 次/月" },
+                { name: "Pro", price: "$9.99", count: "500 次/月", popular: true },
+                { name: "Unlimited", price: "$19.99", count: "不限次" },
+              ].map((plan) => (
+                <button
+                  key={plan.name}
+                  onClick={() => setShowUpgrade(false)}
+                  className={`rounded-lg p-4 text-left hover:bg-gray-50 transition-colors ${
+                    plan.popular
+                      ? "border-2 border-primary bg-primary/5"
+                      : "border border-border"
+                  }`}
+                >
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <span className="font-bold text-lg">{plan.name}</span>
+                        {plan.popular && (
+                          <span className="text-xs bg-primary text-white px-2 py-0.5 rounded-full">
+                            推荐
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-sm text-muted-foreground">
+                        {plan.count}
+                      </div>
+                    </div>
+                    <div className="text-right">
+                      <span className="font-bold text-lg">{plan.price}</span>
+                      <div className="text-xs text-muted-foreground">/月</div>
+                    </div>
+                  </div>
+                </button>
+              ))}
+
+              <p className="text-xs text-muted-foreground text-center">
+                按 $0.05/张 按量付费方案即将推出
+              </p>
+            </div>
+
+            <button
+              onClick={() => setShowUpgrade(false)}
+              className="w-full py-2 text-sm text-muted-foreground hover:text-foreground transition-colors"
+            >
+              关闭
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* 历史记录 — 仅登录用户可见 */}
+      {user && history.length > 0 && (
         <div className="space-y-3">
           <div className="flex items-center justify-between">
             <h3 className="text-lg font-semibold">
@@ -335,6 +505,13 @@ export function BgRemover() {
               </div>
             ))}
           </div>
+        </div>
+      )}
+
+      {/* 未登录提示 — 替代历史记录区域 */}
+      {user && history.length === 0 && (
+        <div className="text-center py-8 text-muted-foreground">
+          <p className="text-sm">还没有处理记录，上传图片开始使用吧 ✨</p>
         </div>
       )}
     </div>

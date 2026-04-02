@@ -54,9 +54,11 @@ function UserBar() {
 }
 
 export default function Home() {
+  const { user } = useUser();
+
   return (
     <main className="min-h-screen flex flex-col">
-      {/* Header — logo 左对齐，登录按钮右对齐 */}
+      {/* Header */}
       <header className="border-b border-border px-6 py-4">
         <div className="max-w-5xl mx-auto flex items-center justify-between">
           <div className="flex items-center gap-2">
@@ -88,14 +90,14 @@ export default function Home() {
         </h2>
         <p className="text-muted-foreground text-lg max-w-xl mx-auto">
           Upload any image and get a clean transparent background in seconds.
-          Powered by AI — no signup, no watermark.
+          Powered by AI — no watermark.
         </p>
       </section>
 
       {/* Main Tool */}
       <section className="flex-1 px-6 pb-16">
         <div className="max-w-5xl mx-auto">
-          <BgRemover />
+          <BgRemover user={user} />
         </div>
       </section>
 
