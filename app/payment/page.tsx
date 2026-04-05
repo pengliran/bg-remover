@@ -11,10 +11,9 @@ function PaymentResult() {
 
   useEffect(() => {
     const token = searchParams.get("token");
-    const orderId = searchParams.get("order_id");
-    const payerId = searchParams.get("PayerID");
+    const orderId = searchParams.get("order_id") || searchParams.get("token");
 
-    if (!token) {
+    if (!orderId) {
       setStatus("error");
       setMessage("支付信息缺失");
       return;
@@ -26,7 +25,14 @@ function PaymentResult() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ orderId }),
     })
-      .then((res) => res.json())
+      .then((res) => {
+        if (!res.ok) {
+          return res.json().then((d) => {
+            throw new Error(d.error || `Server error: ${res.status}`);
+          });
+        }
+        return res.json();
+      })
       .then((data) => {
         if (data.success) {
           setStatus("success");

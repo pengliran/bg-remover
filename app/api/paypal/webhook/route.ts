@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 export const runtime = "edge";
 
-const PAYPAL_BASE_URL = "https://api-m.sandbox.paypal.com";
+const PAYPAL_BASE_URL = "https://api-m.paypal.com";
 const WEBHOOK_ID = process.env.PAYPAL_WEBHOOK_ID || "5E608866RF9911413";
 
 // 积分包配置

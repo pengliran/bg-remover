@@ -3,7 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 export const runtime = "edge";
 
 // PayPal API 配置
-const PAYPAL_BASE_URL = "https://api-m.sandbox.paypal.com";
+const PAYPAL_BASE_URL = "https://api-m.paypal.com";
 
 interface PayPalOrderRequest {
   planId: string;
