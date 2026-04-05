@@ -17,6 +17,7 @@ interface HistoryItem {
   id: string;
   originalThumb: string;
   resultThumb: string;
+  resultDataUrl: string; // full-size result for download
   timestamp: number;
   fileName: string;
 }
@@ -75,7 +76,10 @@ function loadHistory(): HistoryItem[] {
   if (typeof window === "undefined") return [];
   try {
     const raw = localStorage.getItem(HISTORY_KEY);
-    return raw ? JSON.parse(raw) : [];
+    return raw ? JSON.parse(raw).map((item: Record<string, unknown>) => ({
+      ...item,
+      resultDataUrl: item.resultDataUrl || "",
+    })) : [];
   } catch {
     return [];
   }
@@ -283,10 +287,16 @@ function BatchUploader({
               createThumbnail(item.file),
               createThumbnail(blob),
             ]);
+            const resultDataUrl = await new Promise<string>((resolve) => {
+              const reader = new FileReader();
+              reader.onload = () => resolve(reader.result as string);
+              reader.readAsDataURL(blob);
+            });
             onHistoryAdd({
               id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
               originalThumb: origThumb,
               resultThumb: resThumb,
+              resultDataUrl,
               timestamp: Date.now(),
               fileName: item.file.name,
             });
@@ -720,10 +730,17 @@ export function BgRemover({ user }: { user: UserInfo | null }) {
           createThumbnail(blob),
         ]);
 
+        const resultDataUrl = await new Promise<string>((resolve) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result as string);
+          reader.readAsDataURL(blob);
+        });
+
         const newItem: HistoryItem = {
           id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
           originalThumb: origThumb,
           resultThumb: resThumb,
+          resultDataUrl,
           timestamp: Date.now(),
           fileName: file.name,
         };
@@ -1065,13 +1082,34 @@ export function BgRemover({ user }: { user: UserInfo | null }) {
                     </span>
                   </div>
                 </div>
-                <div className="px-2 py-1.5">
-                  <p className="text-xs text-foreground truncate">
-                    {item.fileName}
-                  </p>
-                  <p className="text-[10px] text-muted-foreground">
-                    {new Date(item.timestamp).toLocaleString()}
-                  </p>
+                <div className="px-2 py-1.5 flex items-center justify-between">
+                  <div className="min-w-0 flex-1">
+                    <p className="text-xs text-foreground truncate">
+                      {item.fileName}
+                    </p>
+                    <p className="text-[10px] text-muted-foreground">
+                      {new Date(item.timestamp).toLocaleString()}
+                    </p>
+                  </div>
+                  {item.resultDataUrl && (
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        const a = document.createElement("a");
+                        a.href = item.resultDataUrl;
+                        a.download = item.fileName.replace(/\.[^.]+$/, "") + "-no-bg.png";
+                        document.body.appendChild(a);
+                        a.click();
+                        document.body.removeChild(a);
+                      }}
+                      className="ml-2 w-6 h-6 flex items-center justify-center rounded bg-primary/10 text-primary hover:bg-primary/20 transition-colors shrink-0"
+                      title="Download"
+                    >
+                      <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                      </svg>
+                    </button>
+                  )}
                 </div>
                 <button
                   onClick={() => handleDeleteHistory(item.id)}
