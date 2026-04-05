@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import { ImageUploader } from "./image-uploader";
+import JSZip from "jszip";
 
 type Status = "idle" | "processing" | "done" | "error";
 
@@ -28,8 +29,24 @@ interface UsageInfo {
   plan: string;
 }
 
-const HISTORY_KEY = "bg-remover-history";
-const MAX_HISTORY = 20;
+// ─── Batch types ───────────────────────────────────────────────────────────
+
+type BatchStatus = "pending" | "processing" | "done" | "error";
+
+interface BatchItem {
+  id: string;
+  file: File;
+  originalUrl: string;
+  resultUrl: string | null;
+  resultBlob: Blob | null;
+  status: BatchStatus;
+  error: string;
+}
+
+type BatchMode = "single" | "batch";
+
+// ─── Thumbnail helper ───────────────────────────────────────────────────────
+
 const THUMB_MAX_W = 120;
 
 function createThumbnail(blob: Blob): Promise<string> {
@@ -49,6 +66,11 @@ function createThumbnail(blob: Blob): Promise<string> {
   });
 }
 
+// ─── History helpers ───────────────────────────────────────────────────────
+
+const HISTORY_KEY = "bg-remover-history";
+const MAX_HISTORY = 20;
+
 function loadHistory(): HistoryItem[] {
   if (typeof window === "undefined") return [];
   try {
@@ -63,6 +85,8 @@ function saveHistory(items: HistoryItem[]) {
   if (typeof window === "undefined") return;
   localStorage.setItem(HISTORY_KEY, JSON.stringify(items));
 }
+
+// ─── useUser hook ───────────────────────────────────────────────────────────
 
 export function useUser() {
   const [user, setUser] = useState<UserInfo | null>(null);
@@ -84,6 +108,489 @@ export function useUser() {
   return { user, setUser, logout };
 }
 
+// ─── BatchUploader component ───────────────────────────────────────────────
+
+const ACCEPT_TYPES = ["image/png", "image/jpeg", "image/webp", "image/jpg"];
+const MAX_SIZE = 10 * 1024 * 1024;
+
+function BatchUploader({
+  usage,
+  onComplete,
+  user,
+}: {
+  usage: UsageInfo | null;
+  onComplete: () => void;
+  user: UserInfo | null;
+}) {
+  const [items, setItems] = useState<BatchItem[]>([]);
+  const [dragging, setDragging] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  // Cleanup object URLs on unmount
+  useEffect(() => {
+    return () => {
+      items.forEach((item) => {
+        URL.revokeObjectURL(item.originalUrl);
+        if (item.resultUrl) URL.revokeObjectURL(item.resultUrl);
+      });
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const totalCount = items.length;
+  const completedCount = items.filter(
+    (i) => i.status === "done" || i.status === "error"
+  ).length;
+  const successCount = items.filter((i) => i.status === "done").length;
+  const failedCount = items.filter((i) => i.status === "error").length;
+  const progressPercent =
+    totalCount > 0 ? Math.round((completedCount / totalCount) * 100) : 0;
+
+  const validate = (file: File): string | null => {
+    if (!ACCEPT_TYPES.includes(file.type)) {
+      return "Please upload PNG, JPEG, or WebP.";
+    }
+    if (file.size > MAX_SIZE) {
+      return "Image must be under 10MB.";
+    }
+    return null;
+  };
+
+  const addFiles = useCallback(
+    (files: FileList | File[]) => {
+      const newItems: BatchItem[] = [];
+      for (const file of Array.from(files)) {
+        const err = validate(file);
+        if (err) continue;
+        newItems.push({
+          id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+          file,
+          originalUrl: URL.createObjectURL(file),
+          resultUrl: null,
+          resultBlob: null,
+          status: "pending",
+          error: "",
+        });
+      }
+      if (newItems.length > 0) {
+        setItems((prev) => [...prev, ...newItems]);
+      }
+    },
+    []
+  );
+
+  const handleDrop = useCallback(
+    (e: React.DragEvent) => {
+      e.preventDefault();
+      setDragging(false);
+      if (e.dataTransfer.files.length > 0) {
+        addFiles(e.dataTransfer.files);
+      }
+    },
+    [addFiles]
+  );
+
+  const handleInputChange = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      if (e.target.files && e.target.files.length > 0) {
+        addFiles(e.target.files);
+      }
+    },
+    [addFiles]
+  );
+
+  const removeItem = useCallback((id: string) => {
+    setItems((prev) => {
+      const item = prev.find((i) => i.id === id);
+      if (item) {
+        URL.revokeObjectURL(item.originalUrl);
+        if (item.resultUrl) URL.revokeObjectURL(item.resultUrl);
+      }
+      return prev.filter((i) => i.id !== id);
+    });
+  }, []);
+
+  const clearAll = useCallback(() => {
+    setItems((prev) => {
+      prev.forEach((item) => {
+        URL.revokeObjectURL(item.originalUrl);
+        if (item.resultUrl) URL.revokeObjectURL(item.resultUrl);
+      });
+      return [];
+    });
+  }, []);
+
+  // Process a single item
+  const processItem = useCallback(
+    async (id: string) => {
+      setItems((prev) =>
+        prev.map((i) => (i.id === id ? { ...i, status: "processing" as BatchStatus, error: "" } : i))
+      );
+
+      try {
+        const item = items.find((i) => i.id === id);
+        if (!item) return;
+
+        const formData = new FormData();
+        formData.append("image", item.file);
+
+        const res = await fetch("/api/remove-bg", {
+          method: "POST",
+          body: formData,
+        });
+
+        if (res.status === 429) {
+          const data = await res.json().catch(() => ({}));
+          setItems((prev) =>
+            prev.map((i) =>
+              i.id === id
+                ? {
+                    ...i,
+                    status: "error" as BatchStatus,
+                    error:
+                      data.isGuest
+                        ? `额度用完（${data.usedToday}/${data.limit}次）`
+                        : `今日额度已用完（${data.usedToday}/${data.limit}次）`,
+                  }
+                : i
+            )
+          );
+          return;
+        }
+
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw new Error(data.error || `Request failed: ${res.status}`);
+        }
+
+        const blob = await res.blob();
+        const resultUrl = URL.createObjectURL(blob);
+
+        setItems((prev) =>
+          prev.map((i) =>
+            i.id === id
+              ? { ...i, status: "done" as BatchStatus, resultUrl, resultBlob: blob }
+              : i
+          )
+        );
+      } catch (err) {
+        const message =
+          err instanceof Error ? err.message : "Something went wrong";
+        setItems((prev) =>
+          prev.map((i) =>
+            i.id === id ? { ...i, status: "error" as BatchStatus, error: message } : i
+          )
+        );
+      }
+    },
+    [items]
+  );
+
+  // Start batch processing
+  const startProcessing = useCallback(async () => {
+    if (!usage || usage.remaining <= 0) return;
+
+    const pendingItems = items.filter((i) => i.status === "pending");
+    for (const item of pendingItems) {
+      await processItem(item.id);
+    }
+  }, [items, usage, processItem]);
+
+  // Auto-start when items are added (only if we have enough usage)
+  useEffect(() => {
+    if (items.length === 0) return;
+    const hasPending = items.some((i) => i.status === "pending");
+    if (hasPending && usage && usage.remaining > 0) {
+      startProcessing();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [items.length]);
+
+  // Download single file
+  const downloadItem = useCallback((item: BatchItem) => {
+    if (!item.resultBlob) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const a = document.createElement("a");
+      a.href = reader.result as string;
+      a.download = item.file.name.replace(/\.[^.]+$/, "") + "-no-bg.png";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    };
+    reader.readAsDataURL(item.resultBlob);
+  }, []);
+
+  // Download all as ZIP
+  const downloadAllZip = useCallback(async () => {
+    const doneItems = items.filter((i) => i.status === "done" && i.resultBlob);
+    if (doneItems.length === 0) return;
+
+    const zip = new JSZip();
+    const folder = zip.folder("bg-removed");
+
+    await Promise.all(
+      doneItems.map(async (item) => {
+        const baseName = item.file.name.replace(/\.[^.]+$/, "");
+        const blob = item.resultBlob!;
+        const arrayBuffer = await blob.arrayBuffer();
+        folder!.file(`${baseName}-no-bg.png`, arrayBuffer);
+      })
+    );
+
+    const content = await zip.generateAsync({ type: "blob" });
+    const reader = new FileReader();
+    reader.onload = () => {
+      const a = document.createElement("a");
+      a.href = reader.result as string;
+      a.download = `bg-removed-${Date.now()}.zip`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    };
+    reader.readAsDataURL(content);
+  }, [items]);
+
+  // Status badge
+  const StatusBadge = ({ status, error }: { status: BatchStatus; error: string }) => {
+    switch (status) {
+      case "pending":
+        return (
+          <span className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-gray-100 text-gray-500">
+            ⏳ 等待中
+          </span>
+        );
+      case "processing":
+        return (
+          <span className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-blue-100 text-blue-600">
+            <span className="w-3 h-3 border-2 border-blue-600 border-t-transparent rounded-full animate-spin" />
+            处理中
+          </span>
+        );
+      case "done":
+        return (
+          <span className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-green-100 text-green-600">
+            ✅ 完成
+          </span>
+        );
+      case "error":
+        return (
+          <span
+            className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-red-100 text-red-600"
+            title={error}
+          >
+            ❌ 失败: {error}
+          </span>
+        );
+    }
+  };
+
+  return (
+    <div className="space-y-4">
+      {/* Drop zone */}
+      <div
+        onDragOver={(e) => {
+          e.preventDefault();
+          setDragging(true);
+        }}
+        onDragLeave={() => setDragging(false)}
+        onDrop={handleDrop}
+        onClick={() => inputRef.current?.click()}
+        className={`
+          border-2 border-dashed rounded-xl p-8 text-center cursor-pointer transition-colors
+          ${dragging ? "border-primary bg-primary/5" : "border-border hover:border-primary/50 hover:bg-muted/50"}
+        `}
+      >
+        <div className="flex flex-col items-center gap-2">
+          <div className="w-10 h-10 rounded-full bg-muted flex items-center justify-center">
+            <svg
+              className="w-5 h-5 text-muted-foreground"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+              strokeWidth={1.5}
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5"
+              />
+            </svg>
+          </div>
+          <div>
+            <p className="font-medium text-sm">
+              拖拽多张图片到这里，或{" "}
+              <span className="text-primary">点击选择</span>
+            </p>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              PNG, JPEG, WebP — 每张最大 10MB
+            </p>
+          </div>
+        </div>
+        <input
+          ref={inputRef}
+          type="file"
+          accept={ACCEPT_TYPES.join(",")}
+          multiple
+          onChange={handleInputChange}
+          className="hidden"
+        />
+      </div>
+
+      {/* Usage warning */}
+      {usage && items.length > usage.remaining && items.some((i) => i.status === "pending") && (
+        <div className="bg-yellow-50 border border-yellow-200 rounded-lg px-4 py-2.5 text-sm text-yellow-700">
+          ⚠️ 已选择 {items.length} 张图片，但您当前剩余 {usage.remaining} 次额度，超出的图片将处理失败。建议分批上传。
+        </div>
+      )}
+
+      {/* File list */}
+      {items.length > 0 && (
+        <>
+          {/* Overall progress */}
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between text-sm">
+              <span className="text-muted-foreground">
+                总体进度 ({completedCount}/{totalCount})
+              </span>
+              <span className="font-medium">{progressPercent}%</span>
+            </div>
+            <div className="w-full bg-muted rounded-full h-2">
+              <div
+                className="bg-primary h-2 rounded-full transition-all duration-300"
+                style={{ width: `${progressPercent}%` }}
+              />
+            </div>
+            <div className="flex gap-4 text-xs text-muted-foreground">
+              <span>✅ 成功: {successCount}</span>
+              <span>❌ 失败: {failedCount}</span>
+              <span>⏳ 等待: {items.filter((i) => i.status === "pending").length}</span>
+            </div>
+          </div>
+
+          {/* File items grid */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+            {items.map((item) => (
+              <div
+                key={item.id}
+                className="rounded-lg border border-border overflow-hidden bg-muted/30 hover:shadow-sm transition-shadow"
+              >
+                {/* Thumbnails */}
+                <div className="flex h-28">
+                  <div className="flex-1 relative bg-muted">
+                    <img
+                      src={item.originalUrl}
+                      alt="Original"
+                      className="w-full h-full object-cover"
+                    />
+                    <span className="absolute bottom-0.5 left-0.5 text-[9px] bg-black/50 text-white px-1 rounded">
+                      原图
+                    </span>
+                  </div>
+                  <div className="flex-1 checkerboard relative">
+                    {item.resultUrl ? (
+                      <img
+                        src={item.resultUrl}
+                        alt="Result"
+                        className="w-full h-full object-cover"
+                      />
+                    ) : (
+                      <div className="w-full h-full flex items-center justify-center">
+                        {item.status === "processing" && (
+                          <div className="w-5 h-5 border-2 border-primary border-t-transparent rounded-full animate-spin" />
+                        )}
+                        {item.status === "pending" && (
+                          <span className="text-muted-foreground text-xs">—</span>
+                        )}
+                        {item.status === "error" && (
+                          <span className="text-red-500 text-xs px-1">失败</span>
+                        )}
+                      </div>
+                    )}
+                    <span className="absolute bottom-0.5 right-0.5 text-[9px] bg-black/50 text-white px-1 rounded">
+                      结果
+                    </span>
+                  </div>
+                </div>
+
+                {/* Info row */}
+                <div className="px-2 py-1.5 space-y-1">
+                  <p className="text-xs truncate font-medium" title={item.file.name}>
+                    {item.file.name}
+                  </p>
+                  <div className="flex items-center justify-between">
+                    <StatusBadge status={item.status} error={item.error} />
+                    <div className="flex gap-1">
+                      {item.status === "done" && (
+                        <button
+                          onClick={() => downloadItem(item)}
+                          className="text-xs px-1.5 py-0.5 bg-green-100 text-green-600 rounded hover:bg-green-200 transition-colors"
+                          title="下载"
+                        >
+                          ⬇️
+                        </button>
+                      )}
+                      <button
+                        onClick={() => removeItem(item.id)}
+                        className="text-xs px-1.5 py-0.5 bg-red-50 text-red-400 rounded hover:bg-red-100 transition-colors"
+                        title="移除"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* Action buttons */}
+          <div className="flex flex-wrap gap-3 justify-center">
+            {successCount > 0 && (
+              <button
+                onClick={downloadAllZip}
+                className="bg-primary text-primary-foreground px-5 py-2.5 rounded-lg font-medium text-sm hover:bg-primary/90 transition-colors"
+              >
+                ⬇️ 下载全部 ZIP ({successCount} 张)
+              </button>
+            )}
+            {items.some((i) => i.status === "pending") && (
+              <button
+                onClick={startProcessing}
+                disabled={!usage || usage.remaining <= 0}
+                className="bg-primary text-primary-foreground px-5 py-2.5 rounded-lg font-medium text-sm hover:bg-primary/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                🪄 开始处理
+              </button>
+            )}
+            <button
+              onClick={clearAll}
+              className="bg-muted text-foreground px-5 py-2.5 rounded-lg font-medium text-sm hover:bg-muted/80 transition-colors"
+            >
+              清空列表
+            </button>
+            <button
+              onClick={onComplete}
+              className="bg-muted text-foreground px-5 py-2.5 rounded-lg font-medium text-sm hover:bg-muted/80 transition-colors"
+            >
+              返回单张模式
+            </button>
+          </div>
+        </>
+      )}
+
+      {/* Empty state */}
+      {items.length === 0 && (
+        <div className="text-center py-6 text-muted-foreground text-sm">
+          选择多张图片开始批量处理 ✨
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── BgRemover ─────────────────────────────────────────────────────────────
+
 export function BgRemover({ user }: { user: UserInfo | null }) {
   const [originalUrl, setOriginalUrl] = useState<string | null>(null);
   const [resultBlob, setResultBlob] = useState<Blob | null>(null);
@@ -94,6 +601,7 @@ export function BgRemover({ user }: { user: UserInfo | null }) {
   const [fileName, setFileName] = useState("");
   const [usage, setUsage] = useState<UsageInfo | null>(null);
   const [showUpgrade, setShowUpgrade] = useState(false);
+  const [mode, setMode] = useState<BatchMode>("single");
   const fileRef = useRef<File | null>(null);
 
   // 加载历史（仅登录用户）
@@ -252,6 +760,10 @@ export function BgRemover({ user }: { user: UserInfo | null }) {
     localStorage.removeItem(HISTORY_KEY);
   }, []);
 
+  const handleBatchComplete = useCallback(() => {
+    setMode("single");
+  }, []);
+
   return (
     <div className="space-y-8">
       {/* 用量提示条 */}
@@ -282,8 +794,43 @@ export function BgRemover({ user }: { user: UserInfo | null }) {
         </div>
       )}
 
-      {/* 上传区域 */}
-      {!originalUrl && <ImageUploader onFileSelect={handleFileSelect} />}
+      {/* Tab 切换：单张 / 批量 */}
+      {!originalUrl && (
+        <div className="flex border-b border-border">
+          <button
+            onClick={() => setMode("single")}
+            className={`px-4 py-2 text-sm font-medium transition-colors ${
+              mode === "single"
+                ? "border-b-2 border-primary text-primary"
+                : "text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            🖼️ 单张处理
+          </button>
+          <button
+            onClick={() => setMode("batch")}
+            className={`px-4 py-2 text-sm font-medium transition-colors ${
+              mode === "batch"
+                ? "border-b-2 border-primary text-primary"
+                : "text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            📦 批量处理
+          </button>
+        </div>
+      )}
+
+      {/* 单张模式 */}
+      {mode === "single" && !originalUrl && <ImageUploader onFileSelect={handleFileSelect} />}
+
+      {/* 批量模式 */}
+      {mode === "batch" && !originalUrl && (
+        <BatchUploader
+          usage={usage}
+          onComplete={handleBatchComplete}
+          user={user}
+        />
+      )}
 
       {/* 处理结果 */}
       {originalUrl && (
