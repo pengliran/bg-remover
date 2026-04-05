@@ -7,6 +7,7 @@ import {
   SESSION_COOKIE,
   generateSessionToken,
 } from "@/lib/google-auth";
+import { upsertUser } from "@/lib/db";
 
 export const runtime = "edge";
 
@@ -75,13 +76,25 @@ export async function GET(request: NextRequest) {
     const userInfo = await userRes.json();
     const { id: googleId, email, name, picture: avatar } = userInfo;
 
-    // 3. 生成 session 并通过 cookie 返回用户信息（加密 JWT 方式简化实现）
-    const sessionToken = generateSessionToken();
-    const userData = JSON.stringify({
-      id: googleId,
+    // 3. 写入/更新 D1 数据库
+    const dbUser = await upsertUser({
+      googleId,
       email,
       name,
       avatar,
+    });
+
+    // 4. 生成 session，将数据库中的套餐信息也写入 cookie
+    const sessionToken = generateSessionToken();
+    const userData = JSON.stringify({
+      id: googleId,
+      dbUserId: dbUser.id,
+      email,
+      name,
+      avatar,
+      plan: dbUser.plan || "free",
+      credits: dbUser.credits || 0,
+      subscriptionExpires: dbUser.subscription_expires || null,
       token: sessionToken,
     });
 

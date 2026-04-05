@@ -1,4 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
+import { SESSION_COOKIE } from "@/lib/google-auth";
+import { getUserByGoogleId, updateUserPlan, addUserCredits } from "@/lib/db";
 
 export const runtime = "edge";
 
@@ -56,7 +58,19 @@ async function getPayPalAccessToken(): Promise<string> {
   return data.access_token;
 }
 
-// POST /api/paypal/create-order — 创建 PayPal 订单
+// 从 cookie 获取用户 Google ID
+function getUserGoogleId(request: NextRequest): string | null {
+  const raw = request.cookies.get(SESSION_COOKIE)?.value;
+  if (!raw) return null;
+  try {
+    const userData = JSON.parse(Buffer.from(raw, "base64").toString());
+    return userData.id || null;
+  } catch {
+    return null;
+  }
+}
+
+// POST /api/paypal — 创建 PayPal 订单
 export async function POST(request: NextRequest) {
   try {
     const body: PayPalOrderRequest = await request.json();
@@ -135,7 +149,7 @@ export async function POST(request: NextRequest) {
   }
 }
 
-// PUT /api/paypal/capture — 捕获支付
+// PUT /api/paypal — 捕获支付并写入 D1
 export async function PUT(request: NextRequest) {
   try {
     const { orderId } = await request.json();
@@ -176,8 +190,31 @@ export async function PUT(request: NextRequest) {
     const [planType, planId] = customId.split(":");
     const amount = capture.purchase_units[0]?.payments?.captures[0]?.amount?.value || "0";
 
-    // 更新用户 cookie 中的套餐/积分信息
-    const sessionCookie = request.cookies.get("bg_remover_session")?.value;
+    // ★ 关键：从 D1 更新用户套餐/积分
+    const googleId = getUserGoogleId(request);
+
+    if (googleId) {
+      const dbUser = await getUserByGoogleId(googleId);
+      if (dbUser) {
+        if (planType === "subscription") {
+          // 包月套餐：设置 30 天后过期
+          const expiresAt = new Date();
+          expiresAt.setDate(expiresAt.getDate() + 30);
+          await updateUserPlan(dbUser.id, planId, expiresAt.toISOString());
+        } else if (planType === "credit") {
+          // 积分包：直接加积分
+          const pack = CREDIT_PACKS[planId];
+          if (pack) {
+            await addUserCredits(dbUser.id, pack.credits);
+          }
+        }
+      }
+    } else {
+      console.warn("Payment captured but no user session found. Google ID missing.");
+    }
+
+    // 更新 cookie 中的套餐/积分信息
+    const sessionCookie = request.cookies.get(SESSION_COOKIE)?.value;
     let userData: Record<string, unknown> = {};
 
     if (sessionCookie) {
@@ -187,7 +224,10 @@ export async function PUT(request: NextRequest) {
     }
 
     if (planType === "subscription") {
+      const expiresAt = new Date();
+      expiresAt.setDate(expiresAt.getDate() + 30);
       userData.plan = planId;
+      userData.subscriptionExpires = expiresAt.toISOString();
     } else if (planType === "credit") {
       const pack = CREDIT_PACKS[planId];
       userData.credits = (Number(userData.credits) || 0) + (pack?.credits || 0);
@@ -204,7 +244,7 @@ export async function PUT(request: NextRequest) {
         : `已购买 ${CREDIT_PACKS[planId]?.name || planId}`,
     });
 
-    response.cookies.set("bg_remover_session", encoded, {
+    response.cookies.set(SESSION_COOKIE, encoded, {
       path: "/",
       httpOnly: true,
       secure: true,
