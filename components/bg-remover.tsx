@@ -117,10 +117,12 @@ function BatchUploader({
   usage,
   onComplete,
   user,
+  onHistoryAdd,
 }: {
   usage: UsageInfo | null;
   onComplete: () => void;
   user: UserInfo | null;
+  onHistoryAdd?: (item: HistoryItem) => void;
 }) {
   const [items, setItems] = useState<BatchItem[]>([]);
   const [dragging, setDragging] = useState(false);
@@ -273,6 +275,25 @@ function BatchUploader({
               : i
           )
         );
+
+        // 保存历史记录（仅登录用户）
+        if (user && onHistoryAdd && item) {
+          try {
+            const [origThumb, resThumb] = await Promise.all([
+              createThumbnail(item.file),
+              createThumbnail(blob),
+            ]);
+            onHistoryAdd({
+              id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+              originalThumb: origThumb,
+              resultThumb: resThumb,
+              timestamp: Date.now(),
+              fileName: item.file.name,
+            });
+          } catch {
+            // 缩略图生成失败不影响主流程
+          }
+        }
       } catch (err) {
         const message =
           err instanceof Error ? err.message : "Something went wrong";
@@ -829,6 +850,13 @@ export function BgRemover({ user }: { user: UserInfo | null }) {
           usage={usage}
           onComplete={handleBatchComplete}
           user={user}
+          onHistoryAdd={(newItem) => {
+            setHistory((prev) => {
+              const updated = [newItem, ...prev].slice(0, MAX_HISTORY);
+              saveHistory(updated);
+              return updated;
+            });
+          }}
         />
       )}
 
